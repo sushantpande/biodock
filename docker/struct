@@ -1,0 +1,10 @@
+FROM ubuntu:16.04
+RUN apt-get update -y
+RUN apt-get install make -y
+RUN apt-get install wget gcc -y
+RUN wget https://web.stanford.edu/group/pritchardlab/structure_software/release_versions/v2.3.4/structure_kernel_source.tar.gz
+RUN tar -xvzf structure_kernel_source.tar.gz
+WORKDIR structure_kernel_src
+RUN make
+RUN mkdir -p /mnt/data
+CMD ["./structure", "-m", "/mnt/data/mainparams", "-e", "/mnt/data/extraparams"]

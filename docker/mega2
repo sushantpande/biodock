@@ -1,0 +1,19 @@
+FROM ubuntu
+ENV DEBIAN_FRONTEND=noninteractive
+ENV MEGA2_BINARY_DIRECTORY /usr/local/bin
+RUN apt-get update -y
+RUN apt-get install apt-transport-https software-properties-common -y
+
+#add repo to get R > 3.5
+RUN apt-key adv --keyserver keyserver.ubuntu.com --recv-keys E298A3A825C0D65DFD57CBB651716619E084DAB9
+RUN add-apt-repository 'deb https://cloud.r-project.org/bin/linux/ubuntu bionic-cran35/'
+RUN apt-get update -y
+
+#mega2 dependencies 
+RUN apt-get install make tcsh r-base-core wget gcc git python -y
+RUN R -e "install.packages(c('genetics', 'nplplot'), dependencies=T)"
+
+#mega2 installation
+RUN git clone https://bitbucket.org/dweeks/mega2.git
+WORKDIR mega2
+RUN ./install.sh
