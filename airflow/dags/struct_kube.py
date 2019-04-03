@@ -20,6 +20,6 @@ dag = DAG(
 
 t1 = BashOperator(
     task_id='struct',
-    bash_command='kubectl apply -f /home/ubuntu/kube/ng.yaml',
+    bash_command='kubectl apply -f /home/ubuntu/kube/struct.yaml',
     dag=dag)
 
