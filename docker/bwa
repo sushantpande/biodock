@@ -12,18 +12,20 @@ RUN apt-get update \
          gcc 
 
 WORKDIR /tmp
+#Setup bwa
 RUN wget --no-check-certificate https://sourceforge.net/projects/bio-bwa/files/bwa-0.7.17.tar.bz2
 RUN tar xfj bwa-0.7.17.tar.bz2
 WORKDIR /tmp/bwa-0.7.17
 RUN make
-#ADD Makefile.patch Makefile.patch
-#RUN patch < Makefile.patch
 RUN mv bwa /usr/local/bin
 WORKDIR /tmp
+
+#Setup samtools for sorting and indexing
 RUN wget --no-check-certificate https://github.com/samtools/samtools/releases/download/1.9/samtools-1.9.tar.bz2
 RUN tar xvfj samtools-1.9.tar.bz2
 WORKDIR samtools-1.9
 RUN ./configure --prefix=/tmp --without-curses --disable-bz2 --disable-lzma
 RUN make
 RUN mv samtools /usr/local/bin
+
 ENTRYPOINT []
