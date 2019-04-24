@@ -18,14 +18,14 @@ dag = DAG(
 
 t1 = BashOperator(
     task_id='bwa',
-    bash_command='docker run -it -v /tmp:/tmp:rw bwa:v1.0.0 /bin/bash -c "bwa mem -R {{ params.meta }} /tmp/scaffolds.fasta /tmp/evolved-6-R1.fastq | samtools sort > /tmp/bwaoutput.bam && samtools index /tmp/bwaoutput.bam"',
+    bash_command='docker run -v /tmp:/tmp:rw bwa:v1.0.0 /bin/bash -c "bwa mem -R {{ params.meta }} /tmp/scaffolds.fasta /tmp/evolved-6-R1.fastq | samtools sort > /tmp/bwaoutput.bam && samtools index /tmp/bwaoutput.bam"',
     params={"meta": "'@RG\\tID:foo\\tLB:bar\\tPL:illumina\\tPU:illumina\\tSM:SAMPLE'"},
     dag=dag)
 
 
 t2 = BashOperator(
     task_id='gatk',
-    bash_command='docker run -it -v /tmp:/tmp:rw broadinstitute/gatk /bin/bash -c "gatk HaplotypeCaller -R /tmp/scaffolds.fasta -I /tmp/bwaoutput.bam -O /tmp/gatkoutput.vcf"',
+    bash_command='docker run -v /tmp:/tmp:rw broadinstitute/gatk /bin/bash -c "gatk HaplotypeCaller -R /tmp/scaffolds.fasta -I /tmp/bwaoutput.bam -O /tmp/gatkoutput.vcf"',
     dag=dag)
 
 
