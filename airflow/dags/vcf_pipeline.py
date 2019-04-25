@@ -15,6 +15,7 @@ default_args = {
 
 dag = DAG(
     'bwa_gatk_dag', default_args=default_args, schedule_interval=timedelta(minutes=10))
+    'bwa_gatk_dag', default_args=default_args, schedule_interval=None)
 
 t1 = BashOperator(
     task_id='bwa',
