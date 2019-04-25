@@ -1,0 +1,26 @@
+apiVersion: apps/v1beta1 # for versions before 1.9.0 use apps/v1beta2
+kind: Deployment
+metadata:
+  name: bwa-deployment
+spec:
+  replicas: 1 # tells deployment to run 2 pods matching the template
+  template:
+    metadata:
+      labels:
+        app: bwaapp
+    spec:
+      containers:
+      - name: bwaapp
+        image: sushantpande/bwa 
+        volumeMounts:
+        - name: ws
+          mountPath: /mnt
+        command: [ "/bin/bash", "-c"]
+        #args: ["gatk HaplotypeCaller -R /tmp/scaffolds.fasta -I /tmp/bwaoutput.bam -O /tmp/gatkoutput.vcf"]
+        args: ["bwa mem -R '@RG\\tID:foo\\tLB:bar\\tPL:illumina\\tPU:illumina\\tSM:SAMPLE' /tmp/scaffolds.fasta /tmp/evolved-6-R1.fastq | samtools sort > /tmp/bwaoutput.bam && samtools index /tmp/bwaoutput.bam"]
+      volumes:
+      - name: ws
+        hostPath:
+            path: /tmp
+      imagePullSecrets:
+      - name: regcred
