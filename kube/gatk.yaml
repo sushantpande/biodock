@@ -1,0 +1,29 @@
+apiVersion: apps/v1beta1 # for versions before 1.9.0 use apps/v1beta2
+kind: Deployment
+#kind: Pod
+metadata:
+  name: gatk-deployment
+spec:
+  replicas: 1 # tells deployment to run 1 pods matching the template
+  template:
+    metadata:
+      labels:
+        app: gatkapp
+    spec:
+      containers:
+      - name: gatkapp
+        resources:
+            limits:
+                memory: 10Gi
+        image: sushantpande/gatk 
+        volumeMounts:
+        - name: ws
+          mountPath: /tmp
+        command: [ "/bin/bash", "-c"]
+        args: ["sleep 300"]
+      volumes:
+      - name: ws
+        hostPath:
+            path: /data
+      imagePullSecrets:
+      - name: regcred
