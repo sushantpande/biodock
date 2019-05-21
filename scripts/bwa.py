@@ -5,6 +5,7 @@ import os
 import pysam
 import pika
 import time
+import glob
 
 REDIS_HOST = os.environ['REDIS_HOST']
 TASK_ID = os.environ['TASK_ID']
@@ -57,62 +58,26 @@ channel.queue_declare(queue=queue)
 split_count = 0
 
 if split == 1:
+    split_output_dir = os.path.join(DATA_DIR, RUN_ID, TASK_ID, "split")
+
+    try:
+        os.makedirs(split_output_dir)
+    except FileExistsError:
+        pass
+
     if split_size:
-        max_files = 1
-        size = 100
-        firstn = size
-        samfile = pysam.AlignmentFile(output, "rb")
-        reads = samfile.fetch()
-        count = 0
-
-        for read in reads:
-            filename = "bwaoutput" + str(split_count) + "_split.sam"
-            filepath = os.path.join(output_dir, filename)
-            outfile = pysam.AlignmentFile(filepath, "w", template=samfile)
-
-            if (count % size) == 0 and count != 0:
-                outfile.close()
-                 
-                bfilename = "bwaoutput" + str(split_count) + "_split.bam"
-                bfilepath = os.path.join(output_dir, filename)
-               
-                cmd = "samtools view -S -bh " + filepath + " > " + bfilepath
-                print ("cmd: %s" %(cmd))
-                completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
-                print ("completedProc: %s" %(completedProc.stderr))
-                channel.basic_publish(exchange='', routing_key=queue, body=filepath)
-                split_count = split_count + 1
-                if split_count > max_files:
-                    break
-                filename = "bwaoutput" + str(split_count) + "_split.bam"
-                filepath = os.path.join(output_dir, filename)
-                print ("Opening file: %s, %s, %s" %(str(split_count), str(count), str(filepath)))
-                outfile = pysam.AlignmentFile(filepath, "w", template=samfile)
-
-            outfile.write(read)
-            count = count + 1
-            print (count)
-        samfile.close()
-        '''        
-        while (True):
-            filename = "bwaoutput" + str(split_count) + "_split.bam"
-            filepath = os.path.join(output_dir, filename)
-            cmd = "samtools view -H" + " " + output + " > " + filepath
-            completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
-
-            cmd = "samtools view -b" + output + " | head -n " + str(firstn) +\
-                  " | tail -n " + str(size) + " >> " + filepath
-            completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
-            cmd = "samtools view " + output + " | head -n " + str(firstn) +\
-                  " | tail -n " + str(size) + " | wc -l"
-            completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
-            channel.basic_publish(exchange='', routing_key=queue, body=filepath)
-            print ("completedProc.stdout: %s" %(int(completedProc.stdout)))
-            if (int(completedProc.stdout) < size):
-                break
-            firstn = firstn + size
-            split_count = split_count + 1
-        '''         
+        lc = 500000
+        header_file = os.path.join(split_output_dir, "header")
+        cmd = "samtools view -H " + output + " > " + header_file
+        completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
+        split_prefix = os.path.join(split_output_dir,"bwaoutput")
+        cmd = "samtools view " + output + " | split - " + split_prefix + " -l " + str(lc) + " --filter='cat " + header_file + " - | samtools view -b - > $FILE.bam' && rm " + header_file       
+        completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
+        glob_split_output_dir = os.path.join(split_output_dir, "*")
+        file_list = glob.glob(glob_split_output_dir)
+        for file in file_list:
+            channel.basic_publish(exchange='', routing_key=queue, body=file)
+        split_count = len(file_list)
     else:    
         cmd = "samtools view -H" + " " + output + " | cut -f2 | grep '^SN:' | sed s'/SN://'"
         completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
@@ -138,7 +103,7 @@ if split == 1:
 
         samfile.close()
 else:
-    split_count = 3
+    split_count = 1
     channel.basic_publish(exchange='', routing_key=queue, body=output)
 
 #while(True):
