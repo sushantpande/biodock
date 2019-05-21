@@ -141,8 +141,8 @@ else:
     split_count = 3
     channel.basic_publish(exchange='', routing_key=queue, body=output)
 
-while(True):
-    time.sleep(300)
+#while(True):
+#    time.sleep(300)
 
 
 r = redis.Redis(host=REDIS_HOST)
