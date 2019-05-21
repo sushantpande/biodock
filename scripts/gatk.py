@@ -78,3 +78,8 @@ connection.close()
 if total_processed and completedProc:
     update_key = RUN_ID + "." + TASK_ID
     r.incrby(update_key, completedProc.returncode)
+    
+queue_key = ("%s.queue" %(RUN_ID))
+r.set(queue_key, out_queue)
+print ('Queue is: %s' %(out_queue))
+
