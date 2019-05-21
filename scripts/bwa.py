@@ -68,12 +68,12 @@ if split == 1:
     if split_size:
         lc = 500000
         header_file = os.path.join(split_output_dir, "header")
+        glob_split_output_dir = os.path.join(split_output_dir, "*")
         cmd = "samtools view -H " + output + " > " + header_file
         completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
         split_prefix = os.path.join(split_output_dir,"bwaoutput")
-        cmd = "samtools view " + output + " | split - " + split_prefix + " -l " + str(lc) + " --filter='cat " + header_file + " - | samtools view -b - > $FILE.bam' && rm " + header_file       
+        cmd = "samtools view " + output + " | split - " + split_prefix + " -l " + str(lc) + " --filter='cat " + header_file + " - | samtools view -b - > $FILE.bam' && rm " + header_file + " && samtools index " + glob_split_output_dir      
         completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
-        glob_split_output_dir = os.path.join(split_output_dir, "*")
         file_list = glob.glob(glob_split_output_dir)
         for file in file_list:
             channel.basic_publish(exchange='', routing_key=queue, body=file)
