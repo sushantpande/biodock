@@ -67,16 +67,30 @@ if split == 1:
 
     if split_size:
         lc = 500000
+        cmd = "samtools view " + output + " | wc -l"
+        print ("cmd: %s" %cmd)
+        completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
+
+        per_file_count = int(int(completedProc.stdout)/split_size)
+        if per_file_count < 1:
+            print("Cannot split file: Reduce split size")
+            lc = int(completedProc.stdout)
+        else:
+            lc = per_file_count
+        print ("Lines per file would be ~ %s" %(lc))
         header_file = os.path.join(split_output_dir, "header")
         glob_split_output_dir = os.path.join(split_output_dir, "*")
         cmd = "samtools view -H " + output + " > " + header_file
+        print ("cmd: %s" %cmd)
         completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
         split_prefix = os.path.join(split_output_dir,"bwaoutput")
         cmd = "samtools view " + output + " | split - " + split_prefix + " -l " + str(lc) + " --filter='cat " + header_file + " - | samtools view -b - > $FILE.bam' && rm " + header_file     
+        print ("cmd: %s" %cmd)
         completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
         file_list = glob.glob(glob_split_output_dir)
         for file in file_list:
             cmd = "samtools index " + file
+            print ("cmd: %s" %cmd)
             completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
             channel.basic_publish(exchange='', routing_key=queue, body=file)
         split_count = len(file_list)
