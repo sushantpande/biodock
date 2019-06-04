@@ -2,17 +2,17 @@ from __future__ import print_function
 from builtins import range
 from airflow.operators import PythonOperator
 from airflow.operators import BashOperator
-from airflow.models import DAG
+from airflow.models import DAG, Variable
 from datetime import datetime, timedelta
 import subprocess
 from subprocess import PIPE
-import subprocess
-import redis
 import time
 import yaml
-from airflow.models import Variable
 import os
+import re
+import redis
 import hashlib
+from deploy_jobs import kube_create_job_object, kube_run_job_object, kube_monitor_job_status, kube_cleanup_complete_jobs
 
 default_args = {
     'owner': 'airflow',
@@ -26,48 +26,86 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
 }
 
+dag_id = "vcfp"
 dag = DAG(
-    'bwa_gatk_dag_sleek', default_args=default_args, schedule_interval=None)
+    dag_id, default_args=default_args, schedule_interval=None)
 
 
-WORK_DIR = Variable.get('WORK_DIR_NAME')
-AMQP_SERVER = Variable.get('AMQP_SERVER')
-AMQP_PORT = Variable.get('AMQP_PORT')
-AMQP_USER = Variable.get('AMQP_USER')
-AMQP_PWD = Variable.get('AMQP_PWD')
-REDIS_HOST = Variable.get('REDIS_HOST')
-DATA_DIR = Variable.get('bwa_gatk_dag_sleek.DATA_DIR')
-REF_FILE = Variable.get('bwa_gatk_dag_sleek.ref')
-BWA_INPUT = Variable.get('bwa_gatk_dag_sleek.bwa.input')
-BWA_SPLIT = Variable.get('bwa_gatk_dag_sleek.bwa.split')
-BWA_SPLIT_SIZE = Variable.get('bwa_gatk_dag_sleek.bwa.split_size')
-BWA_YAML = Variable.get('bwa_gatk_dag_sleek.bwa.yaml')
-GATK_YAML = Variable.get('bwa_gatk_dag_sleek.gatk.yaml')
-VCF_YAML = Variable.get('bwa_gatk_dag_sleek.vcf.yaml')
-MAX_CONT = int(Variable.get('bwa_gatk_dag_sleek.max_cont'))
+def get_dag_var(key, default_var=None):
+    if default_var == None:
+        return Variable.get(key)
+    else:
+        return Variable.get(key, default_var=default_var)
 
+AMQP_SERVER = get_dag_var('AMQP_SERVER')
+AMQP_PORT = get_dag_var('AMQP_PORT')
+AMQP_USER = get_dag_var('AMQP_USER')
+AMQP_PWD = get_dag_var('AMQP_PWD')
+REDIS_HOST = get_dag_var('REDIS_HOST')
 
-r = redis.Redis(host='172.31.45.104')
+key = ("%s.%s" %(dag_id, 'DATA_DIR'))
+DATA_DIR = get_dag_var(key)
 
-def create_container(yaml_file, **kwargs):
+key = ("%s.%s" %(dag_id, 'ref'))
+REF_FILE = get_dag_var(key)
+
+key = ("%s.%s" %(dag_id, 'bwa.input'))
+BWA_INPUT = get_dag_var(key)
+
+key = ("%s.%s" %(dag_id, 'bwa.split_output'))
+BWA_SPLIT_OUTPUT = get_dag_var(key)
+
+key = ("%s.%s" %(dag_id, 'bwa.split_output_size'))
+BWA_SPLIT_OUTPUT_SIZE = get_dag_var(key)
+
+key = ("%s.%s" %(dag_id, 'bwa.image'))
+BWA_IMAGE = get_dag_var(key)
+
+key = ("%s.%s" %(dag_id, 'gatk.image'))
+GATK_IMAGE = get_dag_var(key)
+
+key = ("%s.%s" %(dag_id, 'vcf.image'))
+VCF_IMAGE = get_dag_var(key)
+
+key = ("%s.%s" %(dag_id, 'max_cont'))
+MAX_CONT = int(get_dag_var(key))
+
+key = ("%s.%s" %(dag_id, 'bwa.cmd'))
+BWA_CMD = get_dag_var(key)
+
+key = ("%s.%s" %(dag_id, 'gatk.cmd'))
+GATK_CMD = get_dag_var(key)
+
+key = ("%s.%s" %(dag_id, 'vcf.cmd'))
+VCF_CMD = get_dag_var(key)
+
+key = ("%s.%s" %(dag_id, 'job.queue'))
+JOB_QUEUE = get_dag_var(key, default_var='')
+
+key = ("%s.%s" %(dag_id, 'work_dir'))
+WORK_DIR = get_dag_var(key)
+
+redis_conn = None
+try:
+    redis_conn = redis.Redis(host=REDIS_HOST)
+except:
+    print ("Failed to open connection to redis server (%s)" %(host))
+ 
+
+def create_container(container_image, cmd, **kwargs):
     parallelism = 0
+    env_vars = {} 
     context = kwargs
     run_id = context['dag_run'].run_id
     task_id = context['task'].task_id
     parent_ids = context['task'].upstream_task_ids
     ti = context['ti']
 
-    yaml_file_name = os.path.basename(yaml_file)
-    this_work_dir = os.path.join(DATA_DIR, WORK_DIR, run_id)
+    print ("Run Id is (%s) and Task Id is (%s)" %(run_id, task_id))
 
-    try:
-        os.makedirs(this_work_dir)
-    except FileExistsError:
-        pass
- 
-    tmp_yaml_file = os.path.join(this_work_dir, yaml_file_name)
+    '''Number of containers to spin for a job'''
     for id in parent_ids:
-        parallelism = parallelism + int(ti.xcom_pull(key=None, task_ids=id))
+        parallelism = parallelism + int(ti.xcom_pull(key='parallelism', task_ids=id))
 
     if parallelism == 0:
         parallelism = 1
@@ -75,87 +113,142 @@ def create_container(yaml_file, **kwargs):
         if parallelism > MAX_CONT:
             parallelism = MAX_CONT 
 
-    print (run_id)
-    print (task_id)
+    '''Set the queue name for downstream jobs'''
+    out_queue = ("%s.%s" %(run_id, task_id)) 
 
-    with open(yaml_file) as fh:
-        manifest = yaml.load(fh)
-    
-    manifest['spec']['parallelism'] = parallelism 
+    '''Set the input queue for this job'''
+    in_queue = ""
 
+    if not parent_ids:
+        in_queue = JOB_QUEUE
+    else:
+        for id in parent_ids:
+            in_queue = ("%s %s " %(in_queue, ti.xcom_pull(key='queue', task_ids=id)))
+
+    '''Get Job and container name (not more then 63 chars)'''
     hash_object = hashlib.md5(run_id.encode())
-    app_name = ("%s-%s" %(manifest['metadata']['name'], hash_object.hexdigest()))
+    container_name = "-".join(re.split('\W+', container_image))
+    jobname = ("%s-%s" %(container_name, hash_object.hexdigest()))[:63]
 
-    manifest['metadata']['name'] = app_name 
+    '''Build evn for job containers'''
+    env_vars.update({'REDIS_HOST': REDIS_HOST})
+    env_vars.update({'AMQP_SERVER': AMQP_SERVER}) 
+    env_vars.update({'AMQP_PORT': AMQP_PORT}) 
+    env_vars.update({'AMQP_USER': AMQP_USER}) 
+    env_vars.update({'AMQP_PWD': AMQP_PWD}) 
+    env_vars.update({'RUN_ID': run_id})
+    env_vars.update({'TASK_ID': task_id})
+    env_vars.update({'DATA_DIR': DATA_DIR})
+    env_vars.update({'WORK_DIR': WORK_DIR})
+    env_vars.update({'REF_FILE': REF_FILE})
+    env_vars.update({'IN_QUEUE': in_queue})
+    env_vars.update({'OUT_QUEUE': out_queue})
 
-    for k in manifest['spec']['template']['spec']['containers'][0].keys():
-        if k == 'env':
-            manifest['spec']['template']['spec']['containers'][0][k].append({'name':'REDIS_HOST', 'value': REDIS_HOST})
-            manifest['spec']['template']['spec']['containers'][0][k].append({'name':'AMQP_SERVER', 'value': AMQP_SERVER})
-            manifest['spec']['template']['spec']['containers'][0][k].append({'name':'AMQP_PORT', 'value': AMQP_PORT})
-            manifest['spec']['template']['spec']['containers'][0][k].append({'name':'AMQP_USER', 'value': AMQP_USER})
-            manifest['spec']['template']['spec']['containers'][0][k].append({'name':'AMQP_PWD', 'value': AMQP_PWD})
-            manifest['spec']['template']['spec']['containers'][0][k].append({'name':'RUN_ID', 'value': run_id})
-            manifest['spec']['template']['spec']['containers'][0][k].append({'name':'TASK_ID', 'value': task_id})
-            manifest['spec']['template']['spec']['containers'][0][k].append({'name':'DATA_DIR', 'value': DATA_DIR})
-            manifest['spec']['template']['spec']['containers'][0][k].append({'name':'REF_FILE', 'value':REF_FILE})
-            if task_id == 'bwa_cc':
-                manifest['spec']['template']['spec']['containers'][0][k].append({'name':'INPUT_FILE', 'value':BWA_INPUT})
-                manifest['spec']['template']['spec']['containers'][0][k].append({'name':'SPLIT', 'value':BWA_SPLIT})
-                manifest['spec']['template']['spec']['containers'][0][k].append({'name':'SPLIT_SIZE', 'value':BWA_SPLIT_SIZE})
-            break
+    if task_id == 'bwa':
+        env_vars.update({'bwa_INPUT': BWA_INPUT})
+        env_vars.update({'BWA_SPLIT_OUTPUT': BWA_SPLIT_OUTPUT})
+        env_vars.update({'BWA_SPLIT_OUTPUT_SIZE': BWA_SPLIT_OUTPUT_SIZE})
 
-    with open(tmp_yaml_file, 'w+') as fh:
-        yaml.dump(manifest, fh, default_flow_style=False)
+    '''Let us use default namespace for now'''
+    namespace = "default"
 
-    cmd = "export KUBECONFIG=/root/.kube/kind-config-kind && kubectl apply -f " + tmp_yaml_file 
-    completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE) 
-    print ("Container creation: %s" %(completedProc.stderr))
-    return (tmp_yaml_file)
+    '''Create, deploy and monitor job'''
+    job = kube_create_job_object(jobname, container_image, container_name, namespace, env_vars, parallelism, cmd) 
+    kube_run_job_object(namespace, job)
+    kube_monitor_job_status(namespace, jobname)
 
-def noop(**kwargs):
+    '''Dump generated manifest file'''
+    print ("Prepare to dump manifest file")
+    this_work_dir = os.path.join(WORK_DIR, run_id, task_id)
+
+    try:
+        os.makedirs(this_work_dir)
+    except FileExistsError:
+        pass
+    
+    tmp_manifest_file = os.path.join(this_work_dir, jobname)
+
+    try:
+        with open(tmp_manifest_file, 'w+') as fh:
+            yaml.dump(job, fh, default_flow_style=False)
+            print ("Dumped manifest file (%s)" %(tmp_manifest_file))
+    except IOError as e:
+            print("Manifest file dumping for job (%s) failed with exception (%s)" %(jobname, e))
+
+    '''Communicate to downstream few values'''
+    ti.xcom_push(key='namespace', value=namespace)
+    ti.xcom_push(key='jobname', value=jobname)
+    ti.xcom_push(key='queue', value=out_queue)
+
+
+def cleanup(**kwargs):
     context = kwargs
     run_id = context['dag_run'].run_id
     print ("Run Id: " + run_id)
     parent_ids = context['task'].upstream_task_ids
-    wait_keys = []
-    _wait_keys = []
-    delete_jobs = []
     ti = context['ti']
     for id in parent_ids:
         key = run_id + "." + id
-        _wait_keys.append(key)
-        wait_keys.append(key)
-        delete_jobs.append(ti.xcom_pull(key=None, task_ids=id))
-    print (wait_keys)
+        namespace = ti.xcom_pull(key='namespace', task_ids=id)
+        jobname = ti.xcom_pull(key='jobname', task_ids=id)
+        print ("Job (%s) is to be deleted from namespace (%s)" %(jobname, namespace))
+        #if (namespace and jobname):
+            #kube_cleanup_complete_jobs(jobname, namespace)
+            
 
-    while (_wait_keys):
-        time.sleep(30)
-        print ("Jobs are in progress.")
-        for key in wait_keys:
-            val = r.get(key)
-            print ("Key %s, Val %s" %(key, val))
-            if val != None:
-                _wait_keys.remove(key)
+def get_output_file_count(run_id, task_id):
+    count = 0
+    file = os.path.join(WORK_DIR, run_id, task_id, ".meta")
+    if os.path.exists(file):
+        with open(file) as fh:
+            try:
+                meta = yaml.safe_load(fh)
+                count = meta.get('OUTPUT_FILE_COUNT', 0)
+            except yaml.YAMLError as e:
+                print ("Failed to load yaml file (%s) got exception (%s)" %(file, e))
+    print ("Output file count of task (%s) is (%s)" %(task_id, count))
+    return count
 
-    split_count = 0
-    for id in parent_ids:
-        key = run_id + "." + id + "." + 'split'
-        val = r.get(key)
-        if val:
-             split_count = split_count + int(val)
 
-    print ("split_count: " + str(split_count))
+def noop(**kwargs):
+    context = kwargs
+    run_id = context['dag_run'].run_id
+    print ("Run Id: (%s)" %(run_id))
+    parent_ids = context['task'].upstream_task_ids
+    ti = context['ti']
 
-    for job in delete_jobs:
-       cmd = "export KUBECONFIG=/root/.kube/kind-config-kind && kubectl delete -f " + job
-       #completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
-    return (split_count)
+    '''Get the total number of output files generated by previous stage'''
+    '''This is to set the parallelism for next stage'''
+    output_file_count = 0
+
+    if redis_conn:
+        for id in parent_ids:
+            key = ("%s.%s.%s" %(run_id, id, 'OUTPUT_FILE_COUNT')) 
+            val = redis_conn.get(key)
+            if val:
+                output_file_count = output_file_count + int(val)
+
+    print ("output_file_count: (%s)" %(output_file_count))
+    
+    '''For file based update'''
+    #for id in parent_ids:
+    #    output_file_count = output_file_count + get_output_file_count(run_id, id)
+
+    in_queue = ""
+    if not parent_ids:
+        in_queue = JOB_QUEUE
+    else:
+        for id in parent_ids:
+            in_queue = ("%s %s " %(in_queue, ti.xcom_pull(key='queue', task_ids=id)))
+
+    ti.xcom_push(key='queue', value=in_queue)
+    ti.xcom_push(key='parallelism', value=output_file_count)
+
 
 t1 = PythonOperator(
-        task_id= 'bwa_cc',
+        task_id= 'bwa',
         python_callable=create_container,
-        op_kwargs={'yaml_file': BWA_YAML},
+        op_kwargs={'container_image': BWA_IMAGE, 'cmd': BWA_CMD},
         provide_context=True,
         dag=dag)
 
@@ -166,10 +259,17 @@ t2 = PythonOperator(
         provide_context=True,
         dag=dag)
 
+t3 = PythonOperator(
+        task_id= 'bwa_cleanup',
+        python_callable=cleanup,
+        op_kwargs={},
+        provide_context=True,
+        dag=dag)
+
 t4 = PythonOperator(
-        task_id= 'gatk_cc',
+        task_id= 'gatk',
         python_callable=create_container,
-        op_kwargs={'yaml_file':GATK_YAML},
+        op_kwargs={'container_image':GATK_IMAGE, 'cmd': GATK_CMD },
         provide_context=True,
         dag=dag)
 
@@ -180,19 +280,39 @@ t5 = PythonOperator(
         provide_context=True,
         dag=dag)
 
-t7 = PythonOperator(
-        task_id= 'vcf_cc',
-        python_callable=create_container,
-        op_kwargs={'yaml_file':VCF_YAML},
+t6 = PythonOperator(
+        task_id= 'gatk_cleanup',
+        python_callable=cleanup,
+        op_kwargs={},
         provide_context=True,
         dag=dag)
 
-t9 = PythonOperator(
+t7 = PythonOperator(
+        task_id= 'vcf',
+        python_callable=create_container,
+        op_kwargs={'container_image':VCF_IMAGE, 'cmd': VCF_CMD},
+        provide_context=True,
+        dag=dag)
+
+t8 = PythonOperator(
         task_id= 'vcf_wait',
         python_callable=noop,
         op_kwargs={},
         provide_context=True,
         dag=dag)
 
-#t1>>t2>>t3>>t4>>t5>>t6
-t1>>t2>>t4>>t5>>t7>>t9
+t9 = PythonOperator(
+        task_id= 'vcf_cleanup',
+        python_callable=cleanup,
+        op_kwargs={},
+        provide_context=True,
+        dag=dag)
+
+t1.set_downstream(t2)
+t1.set_downstream(t3)
+t2.set_downstream(t4)
+t4.set_downstream(t5)
+t4.set_downstream(t6)
+t5.set_downstream(t7)
+t7.set_downstream(t8)
+t7.set_downstream(t9
