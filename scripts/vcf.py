@@ -1,84 +1,118 @@
 import subprocess
 from subprocess import PIPE
 import os
-import pika
-import redis
+import sys
+import utility
+import conn
+import yaml
 
-REDIS_HOST = os.environ['REDIS_HOST']
-TASK_ID = os.environ['TASK_ID']
-RUN_ID = os.environ['RUN_ID']
-DATA_DIR = os.environ['DATA_DIR']
-AMQP_SERVER = os.environ['AMQP_SERVER']
-AMQP_PORT = os.environ['AMQP_PORT']
-AMQP_USER = os.environ['AMQP_USER']
-AMQP_PWD = os.environ['AMQP_PWD']
 
-output_dir = os.path.join(DATA_DIR, RUN_ID, TASK_ID)
+process_from_queue = False
 
-try:
-    os.makedirs(output_dir)
-except FileExistsError:
-    pass
+'''Get input file'''
+in_queue = None
+input_file = utility.get_input_file()
 
-r = redis.Redis(host=REDIS_HOST)
+if not input_file:
+    print ("No input file for Job, looking for input queue")
 
-out_queue = ("%s.%s" %(RUN_ID, TASK_ID))
-queue_key = ("%s.queue" %(RUN_ID))
-in_queue = r.get(queue_key).decode('utf=8')
+    '''Get input queue'''
+    in_queue_str = utility.get_env_param('IN_QUEUE')
+    in_queue_list = in_queue_str.split()
+
+    if not in_queue_list:
+        print ("Found no in_queue for job")
+        sys.exit(os.EX_NOTFOUND)
+    else:
+        in_queue = in_queue_list[0]
+        process_from_queue = True
+
+'''Get output queue'''
+out_queue = utility.get_env_param('OUT_QUEUE')
+
+'''Get output dir'''
+output_dir = utility.get_output_dir() 
+
+'''Get AMQP connection'''
+amqp_conn = conn.get_amqp_conn()
 
 total_processed = 0
 completedProc = None
+output_file_list = []
+input_file_list = []
+channel_out = None
 
-def run_vcfconcat(merge_list):
-    global total_processed, completedProc
-    inputfile_list = ""
-    for name in merge_list:
-        inputfile_list = inputfile_list + " " + name
-        total_processed = total_processed + 1
-    outputfile_name = "merge.vcf"
-    outputfile = os.path.join(output_dir, outputfile_name) 
-    print("Input file list is" + inputfile_list)
+def runVCFConcat(input_file):
+    global total_processed, completedProc, channel_out
+    global output_file_list
 
-    cmd = "vcf-concat " + inputfile_list + " > " + outputfile
+    '''Channel to publish'''
+    if not channel_out:
+        channel_out = amqp_conn.channel()
+        channel_out.queue_declare(queue=out_queue)
+
+    '''inputfile expects absolute path'''
+    print ("Input is (%s)" %(input_file))
+
+    '''Set output file name with absolute path'''
+    output_file_name = "merge.vcf"
+    output_file = os.path.join(output_dir, output_file_name)
+
+    '''Exec VCF command - concat'''
+    cmd = "vcf-concat " + ' '.join(input_file) + " > " + output_file
     print ("Executing: " + cmd)  
     completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
-    print ("VCF Concat output: %s" %(completedProc.stdout))
-    channel.basic_publish(exchange='', routing_key=out_queue, body=outputfile)
 
+    print ("VCF output: %s" %(completedProc.stdout))
+    print ("VCF error: %s" %(completedProc.stderr))
 
-credentials = pika.PlainCredentials(AMQP_USER, AMQP_PWD)
-parameters = pika.ConnectionParameters(AMQP_SERVER, AMQP_PORT, '/', credentials)
-connection = pika.BlockingConnection(parameters)
-channel = connection.channel()
-channel.queue_declare(queue=out_queue)
-channel.basic_qos(prefetch_count=1)
+    output_file_list.append(output_file)
 
-merge_list = []
-while True:
-    print ("Waiting for task to arrive.")
-    method_frame, header_frame, body = channel.basic_get(queue=in_queue, auto_ack=False)
-    print (method_frame)
-    if method_frame == None or method_frame.NAME == 'Basic.GetEmpty':
-        print("Channel Empty.")
-        # We are done, lets break the loop and stop the application.
-        if merge_list:
-            run_vcfconcat(merge_list)
-        else:
-            print ("Nothing to merge :(")
-        break
+    '''Publish to output queue output file name with absolute path'''
+    status = conn.publish_to_amqp(channel_out, routing_key=out_queue, body=output_file)
+    if not status:
+        print ("Cannot publish to AMQP, continuing to process, refer to meta\
+                dir for manul update of AMQP")
     
-    merge_list.append(body.decode("utf=8"))
-    channel.basic_ack(delivery_tag=method_frame.delivery_tag)
-channel.close()
-connection.close()
 
+if channel_out:
+    conn.close_amqp_channel(channel_out)
 
-#print ('VCF tools container creation completed with status code:' + ' ' + str(completedProc.returncode))
+if process_from_queue:
+    '''Channel for consumption'''
+    channel_in = amqp_conn.channel()
+    channel_in.basic_qos(prefetch_count=1)
 
-if total_processed and completedProc:
-    update_key = RUN_ID + "." + TASK_ID
-    r.incrby(update_key, completedProc.returncode)
+    '''Start consuming'''
+    while True:
+        print ("Waiting for task to arrive.")
+        body = conn.consume_from_amqp(channel_in, in_queue)
 
-queue_key = ("%s.queue" %(RUN_ID))
-r.set(queue_key, out_queue)
-print ('Queue is: %s' %(out_queue))
+        if not body:
+            runVCFConcat(input_file_list)
+            break
+
+        input_file_list.append(body)
+
+    '''Close consumption channel'''
+    conn.close_amqp_channel(channel_in)
+else:
+    runVCFConcat(input_file)
+
+'''Close AMQP connection'''
+conn.close_amqp_channel(amqp_conn)
+
+'''Update meta file'''
+meta = {}
+meta.update({'OUTPUT_DIR': output_dir})
+meta.update({'OUT_QUEUE': out_queue})
+meta.update({'IN_QUEUE': in_queue})
+meta.update({'OUTPUT_FILE_LIST': output_file_list})
+meta.update({'OUTPUT_FILE_COUNT': total_processed})
+meta_file = utility.get_meta_file()
+print ("Will write meta info. to file (%s)" %(meta_file))
+
+with open(meta_file, 'w+') as fh:
+    yaml.dump(meta, fh, default_flow_style=False)
+
+sys.exit(os.EX_OK)
