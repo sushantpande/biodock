@@ -1,85 +1,122 @@
 import subprocess
 from subprocess import PIPE
 import os
-import pika
-import redis
+import sys
+import utility
+import conn
+import yaml
 
-REDIS_HOST = os.environ['REDIS_HOST']
-TASK_ID = os.environ['TASK_ID']
-RUN_ID = os.environ['RUN_ID']
-DATA_DIR = os.environ['DATA_DIR']
-AMQP_SERVER = os.environ['AMQP_SERVER']
-AMQP_PORT = os.environ['AMQP_PORT']
-AMQP_USER = os.environ['AMQP_USER']
-AMQP_PWD = os.environ['AMQP_PWD']
-REFFILE = os.environ['REF_FILE']
 
-output_dir = os.path.join(DATA_DIR, RUN_ID, TASK_ID)
+process_from_queue = False
 
-try:
-    os.makedirs(output_dir)
-except FileExistsError:
-    pass
+'''Get input file'''
+in_queue = None
+input_file = utility.get_input_file()
 
-ref = os.path.join(DATA_DIR, REFFILE)
+if not input_file:
+    print ("No input file for Job, looking for input queue")
 
-r = redis.Redis(host=REDIS_HOST)
+    '''Get input queue'''
+    in_queue_str = utility.get_env_param('IN_QUEUE')
+    in_queue_list = in_queue_str.split()
 
-redis_p = r.pipeline()
+    if not in_queue_list:
+        print ("Found no in_queue for job")
+        sys.exit(os.EX_NOTFOUND)
+    else:
+        in_queue = in_queue_list[0]
+        process_from_queue = True
+    
+'''Get output queue'''
+out_queue = utility.get_env_param('OUT_QUEUE')
 
-out_queue = ("%s.%s" %(RUN_ID, TASK_ID))
-queue_key = ("%s.queue" %(RUN_ID))
-in_queue = r.get(queue_key).decode('utf=8')
+'''Get output dir'''
+output_dir = utility.get_output_dir() 
+
+'''Get Reference file'''
+ref = utility.get_ref_file()
+
+'''Get AMQP connection'''
+amqp_conn = conn.get_amqp_conn()
 
 total_processed = 0
 completedProc = None
+output_file_list = []
+channel_out = None
 
-def rungatk(body):
-    global total_processed, completedProc
-    inputfile = body.decode("utf=8")
+def runGATK(inputfile):
+    global total_processed, completedProc, channel_out
+    global output_file_list
+
+    '''Channel to publish'''
+    if not channel_out:
+        channel_out = amqp_conn.channel()
+        channel_out.queue_declare(queue=out_queue)
+
+    '''inputfile expects absolute path'''
     print ("Input is: " + inputfile)
+
+    '''Set output file name with absolute path'''
     outputfile_name = os.path.basename(inputfile) + ".vcf"
     outputfile = os.path.join(output_dir, outputfile_name) 
-    print("Input file is " + inputfile)
 
+    '''Exec GATK command - HaplotypeCaller'''
     cmd = "gatk HaplotypeCaller -R " + ref + " -I " + inputfile + " -O " +  outputfile
-    #cmd = "touch outputfile"
     print ("Executing: " + cmd)  
     completedProc = subprocess.run([cmd, "/dev/null"], shell=True, stdout=PIPE, stderr=PIPE)
+
     print ("GATK output: %s" %(completedProc.stdout))
-    channel.basic_publish(exchange='', routing_key=out_queue, body=outputfile)
+    print ("GATK error: %s" %(completedProc.stderr))
+
+    output_file_list.append(outputfile)
+
+    '''Publish to output queue output file name with absolute path'''
+    status = conn.publish_to_amqp(channel_out, routing_key=out_queue, body=outputfile)
+    if not status:
+        print ("Cannot publish to AMQP, continuing to process, refer to meta\
+                dir for manul update of AMQP")
+    
     total_processed = total_processed + 1
 
 
-credentials = pika.PlainCredentials(AMQP_USER, AMQP_PWD)
-parameters = pika.ConnectionParameters(AMQP_SERVER, AMQP_PORT, '/', credentials)
-connection = pika.BlockingConnection(parameters)
-channel = connection.channel()
-channel.queue_declare(queue=out_queue)
-channel.basic_qos(prefetch_count=1)
+if channel_out:
+    conn.close_amqp_channel(channel_out)
 
-while True:
-    print ("Waiting for task to arrive.")
-    method_frame, header_frame, body = channel.basic_get(queue=in_queue, auto_ack=False)
-    print (method_frame)
-    if method_frame == None or method_frame.NAME == 'Basic.GetEmpty':
-        print("Channel Empty.")
-        # We are done, lets break the loop and stop the application.
-        break
+
+if process_from_queue:
+    '''Channel for consumption'''
+    channel_in = amqp_conn.channel()
+    channel_in.basic_qos(prefetch_count=1)
+
+    '''Start consuming'''
+    while True:
+        print ("Waiting for task to arrive.")
+        body = conn.consume_from_amqp(channel_in, in_queue)
+
+        if not body:
+            break
+
+        runGATK(body)
     
-    rungatk(body)
-    channel.basic_ack(delivery_tag=method_frame.delivery_tag)
-channel.close()
-connection.close()
+    '''Close consumption channel'''
+    conn.close_amqp_channel(channel_in)
+else:
+    runGATK(input_file)
 
+'''Close AMQP connection'''
+conn.close_amqp_channel(amqp_conn)
 
-#print ('GATK container creation completed with status code:' + ' ' + str(completedProc.returncode))
+'''Update meta file'''
+meta = {}
+meta.update({'OUTPUT_DIR': output_dir})
+meta.update({'OUT_QUEUE': out_queue})
+meta.update({'IN_QUEUE': in_queue})
+meta.update({'OUTPUT_FILE_LIST': output_file_list})
+meta.update({'OUTPUT_FILE_COUNT': total_processed})
+meta_file = utility.get_meta_file()
+print ("Will write meta info. to file (%s)" %(meta_file))
 
-if total_processed and completedProc:
-    update_key = RUN_ID + "." + TASK_ID
-    r.incrby(update_key, completedProc.returncode)
-    
-queue_key = ("%s.queue" %(RUN_ID))
-r.set(queue_key, out_queue)
-print ('Queue is: %s' %(out_queue))
+with open(meta_file, 'w+') as fh:
+    yaml.dump(meta, fh, default_flow_style=False)
 
+sys.exit(os.EX_OK)
