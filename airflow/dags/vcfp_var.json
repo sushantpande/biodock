@@ -1,0 +1,21 @@
+{
+    "AMQP_PORT": 5672,
+    "AMQP_PWD": "gatkrabbit",
+    "AMQP_SERVER": "172.31.45.104",
+    "AMQP_USER": "gatkrabbit",
+    "KUBERNETES_HOST": "https://localhost:40097",
+    "REDIS_HOST": "172.31.45.104",
+    "vcfp.DATA_DIR": "/mnt/efs",
+    "vcfp.bwa.cmd": "python3 /mnt/efs/bwa.py",
+    "vcfp.bwa.image": "docker.io/sushantpande/bwaefs:efs",
+    "vcfp.bwa.input": "evolved-6-R1.fastq",
+    "vcfp.bwa.split_output": 1,
+    "vcfp.bwa.split_output_size": 5,
+    "vcfp.gatk.cmd": "python3 /mnt/efs/gatkjobmqsync.py",
+    "vcfp.gatk.image": "docker.io/sushantpande/gatk:efs",
+    "vcfp.max_cont": 10,
+    "vcfp.ref": "scaffolds.fasta",
+    "vcfp.vcf.cmd": "python3 /mnt/efs/vcfjobmqsync.py",
+    "vcfp.vcf.image": "docker.io/sushantpande/vcftools:efs",
+    "vcfp.work_dir": "/mnt/efs/tmp"
+}
