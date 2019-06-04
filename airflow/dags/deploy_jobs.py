@@ -1,16 +1,12 @@
-import hashlib
-import string
-import random
-import time
-import logging
-from pprint import pprint
 import yaml
-import sys,os, time
+import sys
+import os
 import kubernetes
 from kubernetes import client
+from airflow.models import Variable
 
 
-k8_host = "https://localhost:40097"
+k8_host = Variable.get('KUBERNETES_HOST', default_var='https://localhost:40097')
 kubernetes.config.load_kube_config()
 configuration = client.Configuration()
 configuration.host = k8_host
